@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatKit, useChatKit } from "@openai/chatkit-react";
 import {
   STARTER_PROMPTS,
@@ -12,6 +12,10 @@ import {
 } from "@/lib/config";
 import { ErrorOverlay } from "./ErrorOverlay";
 import type { ColorScheme } from "@/hooks/useColorScheme";
+import type {
+  DashboardEvent,
+  DashboardEventResult,
+} from "@/types/dashboard";
 
 export type FactAction = {
   type: "save";
@@ -24,6 +28,8 @@ type ChatKitPanelProps = {
   onWidgetAction: (action: FactAction) => Promise<void>;
   onResponseEnd: () => void;
   onThemeRequest: (scheme: ColorScheme) => void;
+  onDashboardEvent?: (event: DashboardEvent) => DashboardEventResult | Promise<DashboardEventResult>;
+  onControlReady?: (handles: ChatKitHandles | null) => void;
 };
 
 type ErrorState = {
@@ -43,11 +49,25 @@ const createInitialErrors = (): ErrorState => ({
   retryable: false,
 });
 
+type UseChatKitReturnType = ReturnType<typeof useChatKit>;
+
+export type ChatKitHandles = Pick<
+  UseChatKitReturnType,
+  | "sendUserMessage"
+  | "setThreadId"
+  | "sendCustomAction"
+  | "setComposerValue"
+  | "focusComposer"
+  | "fetchUpdates"
+>;
+
 export function ChatKitPanel({
   theme,
   onWidgetAction,
   onResponseEnd,
   onThemeRequest,
+  onDashboardEvent,
+  onControlReady,
 }: ChatKitPanelProps) {
   const processedFacts = useRef(new Set<string>());
   const [errors, setErrors] = useState<ErrorState>(() => createInitialErrors());
@@ -156,6 +176,40 @@ export function ChatKitPanel({
     setErrors(createInitialErrors());
     setWidgetInstanceKey((prev) => prev + 1);
   }, []);
+
+  const forwardDashboardEvent = useCallback(
+    async (
+      name: string,
+      params: Record<string, unknown>
+    ): Promise<Record<string, unknown>> => {
+      if (!onDashboardEvent) {
+        return { success: true };
+      }
+
+      try {
+        const result = await onDashboardEvent({
+          toolName: name,
+          params,
+        });
+
+        if (result && typeof result === "object") {
+          return result;
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error("Dashboard event handler failed", error);
+        return {
+          success: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to handle dashboard event",
+        };
+      }
+    },
+    [onDashboardEvent]
+  );
 
   const getClientSecret = useCallback(
     async (currentSecret: string | null) => {
@@ -312,7 +366,7 @@ export function ChatKitPanel({
         return { success: true };
       }
 
-      return { success: false };
+      return forwardDashboardEvent(invocation.name, invocation.params);
     },
     onResponseEnd: () => {
       onResponseEnd();
@@ -329,6 +383,44 @@ export function ChatKitPanel({
       console.error("ChatKit error", error);
     },
   });
+
+  const {
+    sendUserMessage,
+    setThreadId,
+    sendCustomAction,
+    setComposerValue,
+    focusComposer,
+    fetchUpdates,
+  } = chatkit;
+
+  const controlHandles = useMemo<ChatKitHandles>(
+    () => ({
+      sendUserMessage,
+      setThreadId,
+      sendCustomAction,
+      setComposerValue,
+      focusComposer,
+      fetchUpdates,
+    }),
+    [
+      sendUserMessage,
+      setThreadId,
+      sendCustomAction,
+      setComposerValue,
+      focusComposer,
+      fetchUpdates,
+    ]
+  );
+
+  useEffect(() => {
+    if (!onControlReady) {
+      return;
+    }
+    onControlReady(controlHandles);
+    return () => {
+      onControlReady(null);
+    };
+  }, [controlHandles, onControlReady]);
 
   const activeError = errors.session ?? errors.integration;
   const blockingError = errors.script ?? activeError;
